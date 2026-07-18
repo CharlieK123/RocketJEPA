@@ -1,0 +1,19 @@
+# Secrets
+.ballchasing_token
+
+# Downloaded / processed data (large, do not commit)
+*.replay
+manifest.sqlite
+checkpoint.json
+data/
+replays/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv-decode/
+shards/
+
+# IDE
+.idea/
