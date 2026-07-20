@@ -207,6 +207,66 @@ def apply_physical_norm(a, scale, flag):
 
 
 # --------------------------------------------------------------------------- #
+# Symmetric (physics-only) layout + team-perspective mirror (RLGym-sim invert).
+#
+# For 1v1 self-play the two teams are the same policy viewed from opposite ends,
+# so RLGym canonicalizes orange into blue's frame. Their invert (confirmed from
+# rlgym_sim DefaultObs: inverted_car_data / inverted_ball / inverted_boost_pads)
+# is a 180 deg rotation about z: every vector * [-1,-1,1] (flip x & y -> yaw+=pi),
+# swap the two cars (orange becomes "self"), and reverse the 34 boost pads (the
+# pad list is antipodal, so reverse == the (x,y)->(-x,-y) permutation). It's a
+# proper rotation (no handedness flip), so roll and steer keep their sign.
+#
+# This needs the two cars to be the SAME schema, so we also drop the 8 self-only
+# action columns -> both cars are identical 16-dim physical objects (a shared
+# per-car encoder + PPO-transferable obs). Actions stay in the shards; they just
+# don't feed this encoder. Enable via symmetric=True; mirror=True additionally
+# emits the inverted view (2x data).
+# --------------------------------------------------------------------------- #
+def symmetric_keep(feature_names):
+    """(keep_idx, kept_names): drop the 8 player.act.* cols so self & opponent are
+    identical 16-dim physical objects. ball(12)+self(16)+opp(16)+env(7) = 51."""
+    keep = [i for i, n in enumerate(feature_names) if not n.startswith("player.act.")]
+    return keep, [feature_names[i] for i in keep]
+
+
+def build_invert_plan(feature_names):
+    """Precompute the team invert on a symmetric frame -> (neg[F], yaw_cols, perm[F]).
+    neg: *-1 on x/y vector components and score_diff. yaw_cols: rot_y (+pi, wrapped).
+    perm: swap player<->opponent columns and blue<->orange score."""
+    F = len(feature_names)
+    neg = np.ones(F, np.float32)
+    yaw_cols = []
+    idx = {n: i for i, n in enumerate(feature_names)}
+    for i, n in enumerate(feature_names):
+        base = n.rsplit(".", 1)[-1]
+        if base in ("pos_x", "pos_y", "vel_x", "vel_y", "ang_vel_x", "ang_vel_y", "score_diff"):
+            neg[i] = -1.0
+        elif base == "rot_y":                       # yaw
+            yaw_cols.append(i)
+    perm = list(range(F))
+    for i, n in enumerate(feature_names):           # swap the two cars
+        if n.startswith("player.") and not n.startswith("player.act."):
+            j = idx.get("opponent." + n.split(".", 1)[1])
+            if j is not None:
+                perm[i], perm[j] = j, i
+    if "env.blue_score" in idx and "env.orange_score" in idx:
+        b, o = idx["env.blue_score"], idx["env.orange_score"]
+        perm[b], perm[o] = o, b
+    return neg, np.array(yaw_cols, dtype=int), np.array(perm, dtype=int)
+
+
+def apply_invert(a, plan):
+    """Invert a symmetric physics-only frame [N,F] (RAW units) to the opposite team
+    perspective. Apply BEFORE normalization."""
+    neg, yaw_cols, perm = plan
+    out = a * neg
+    if len(yaw_cols):
+        out[:, yaw_cols] = (out[:, yaw_cols] + np.pi + np.pi) % (2 * np.pi) - np.pi
+    return out[:, perm]
+
+
+# --------------------------------------------------------------------------- #
 # Windowed dataset — for the masked-history JEPA. Experiment with the horizon
 # via `window` (#frames) and `gap` (frame spacing; window spans (window-1)*gap+1
 # real frames, so gap dilates the temporal horizon without more tokens).
@@ -278,7 +338,7 @@ class WindowDataset(IterableDataset):
 
     def __init__(self, shards_dir, window=5, gap=1, step=1,
                  normalize=False, shuffle=True, seed=0, drop_noise=True,
-                 resume="go", pad_state=False):
+                 resume="go", pad_state=False, symmetric=False, mirror=False):
         self.files = sorted(glob.glob(str(Path(shards_dir) / "shard_*.zst")))
         if not self.files:
             raise FileNotFoundError(f"no shard_*.zst in {shards_dir}")
@@ -286,28 +346,39 @@ class WindowDataset(IterableDataset):
         self.shuffle, self.seed = shuffle, seed
         self.drop_noise = drop_noise
         self.resume = resume
-        # pad_state: reconstruct + append the 34 boost-pad recharge-fraction columns
-        # to the env block on the fly (env 7 -> 41, frame feat_dim -> feat_dim+34).
-        # Deterministic from car positions; see boost_pad_state.py.
+        # pad_state: append the 34 boost-pad recharge cols (env 7 -> 41).
         self.pad_state = pad_state
+        # symmetric: drop the 8 action cols so self & opponent are identical 16-dim
+        # physical objects (frame 59 -> 51). mirror: also emit the team-inverted view
+        # (2x data); requires symmetric (orange has no actions to invert), so it
+        # force-enables it. See the RLGym-sim invert helpers above.
+        self.symmetric = symmetric or mirror
+        self.mirror = mirror
         _, meta = load_shard(self.files[0])
-        self.feature_names = meta["feature_names"]
-        self.feat_dim = meta["feat_dim"]
+        base_names = meta["feature_names"]                       # 59
+        if self.symmetric:
+            self.keep_idx, base_names = symmetric_keep(base_names)   # -> 51
+            self.keep_idx = np.array(self.keep_idx)
+        else:
+            self.keep_idx = None
+        self.feature_names = list(base_names)
+        self.feat_dim = len(base_names)
         if pad_state:
             from boost_pad_state import PAD_FEATURE_NAMES
             self.feature_names = self.feature_names + PAD_FEATURE_NAMES
-            self.feat_dim = self.feat_dim + len(PAD_FEATURE_NAMES)
-        # normalize="physical" -> fixed scale by known game bounds (deterministic);
-        # True / (mean,std) -> empirical z-score via norm_stats.npz; False -> raw.
+            self.feat_dim += len(PAD_FEATURE_NAMES)
+        # normalization is built on the (possibly symmetric) base feature set;
+        # pad/boolean cols already 0-1 pass through. "physical" -> fixed game-bound
+        # scaling; True/(mean,std) -> z-score via norm_stats.npz; False -> raw.
         self.physical = isinstance(normalize, str) and normalize == "physical"
         if self.physical:
-            # built from BASE features (a is the 59-dim frame before pads append;
-            # pad/boolean cols are already 0-1 and pass through untouched).
-            self.phys_scale, self.phys_flag = build_physical_norm(meta["feature_names"])
+            self.phys_scale, self.phys_flag = build_physical_norm(base_names)
             self.mean = self.std = None
         else:
             norm = _load_norm(shards_dir, normalize)
             self.mean, self.std = (norm if norm is not None else (None, None))
+        # team-invert plan (built on the symmetric base) for the mirror view
+        self.invert_plan = build_invert_plan(base_names) if self.mirror else None
 
     def __iter__(self):
         info = get_worker_info()
@@ -316,12 +387,19 @@ class WindowDataset(IterableDataset):
         order = rng.permutation(len(files)) if self.shuffle else range(len(files))
         span = (self.window - 1) * self.gap + 1
         offs = np.arange(self.window) * self.gap
+
+        def finalize(x, pads):                        # normalize base + append pads
+            if self.physical:
+                x = apply_physical_norm(x, self.phys_scale, self.phys_flag)
+            elif self.mean is not None:
+                x = (x - self.mean) / self.std
+            if pads is not None:
+                x = np.concatenate([x, pads], axis=1)
+            return x
+
         for fi in order:
             arr, meta = load_shard(files[fi])
-            a = arr.astype(np.float32)
-            # live mask on RAW values (score/hit flags) before any normalization.
-            # Use the shard's own feature_names (not self.feature_names, which may
-            # carry the extra pad columns that arr doesn't have yet).
+            # live mask on the RAW full frame (uses hit flag, scores, player vel)
             base_names = meta["feature_names"]
             live = None
             if self.drop_noise:
@@ -330,18 +408,22 @@ class WindowDataset(IterableDataset):
                     lo, L = r["start"], r["length"]
                     live[lo:lo + L] = live_play_mask(arr[lo:lo + L], base_names,
                                                      resume=self.resume)
-            # boost-pad recharge fractions: reconstruct from RAW positions per replay
+            # boost-pad recharge fractions from RAW positions (per replay)
             pads = None
             if self.pad_state:
                 from boost_pad_state import shard_pad_recharge
-                pads = shard_pad_recharge(arr, meta)          # [total, 34], already [0,1]
-            if self.physical:
-                a = apply_physical_norm(a, self.phys_scale, self.phys_flag)  # base feats
-            elif self.mean is not None:
-                a = (a - self.mean) / self.std                # normalize base feats only
-            if pads is not None:
-                a = np.concatenate([a, pads], axis=1)         # append after (un-normalized)
-            # prefix sum of dead frames -> O(1) "is span [st,st+span) all live?"
+                pads = shard_pad_recharge(arr, meta)          # [total, 34] raw [0,1]
+            # symmetric physics-only base (drop actions), RAW
+            a = arr.astype(np.float32)
+            if self.keep_idx is not None:
+                a = a[:, self.keep_idx]
+            # native view + optional team-inverted view (both normalized)
+            variants = [finalize(a, pads)]
+            if self.mirror:
+                a_inv = apply_invert(a, self.invert_plan)     # RAW invert -> opp team
+                pads_inv = pads[:, ::-1].copy() if pads is not None else None
+                variants.append(finalize(a_inv, pads_inv))
+            # window starts (identical for every variant — same temporal structure)
             dead_ps = (np.concatenate([[0], np.cumsum(~live)])
                        if live is not None else None)
             starts = []
@@ -358,21 +440,24 @@ class WindowDataset(IterableDataset):
             if self.shuffle:
                 rng.shuffle(starts)
             for st in starts:
-                yield torch.from_numpy(a[st + offs])   # [window, feat_dim]
+                for v in variants:                  # native (+ mirror) -> 2x windows
+                    yield torch.from_numpy(v[st + offs])   # [window, feat_dim]
 
 
 def build_window_loader(shards_dir, window=5, gap=1, step=1, batch_size=64,
                         normalize=False, num_workers=0, shuffle=True, seed=0,
-                        drop_noise=True, resume="go", pad_state=False):
+                        drop_noise=True, resume="go", pad_state=False,
+                        symmetric=False, mirror=False):
     """DataLoader yielding windows [B, window, feat_dim] for the masked-history model.
-    `drop_noise=True` filters out kickoff-freeze and post-goal windows; `resume`
-    ("go"/"first_touch") sets where each dead span ends. `pad_state=True` appends the
-    34 boost-pad recharge-fraction columns (feat_dim -> feat_dim+34).
-    `normalize`: "physical" (fixed scale by known game bounds -> [-1,1], deterministic,
-    no stats file needed), True/(mean,std) (empirical z-score via norm_stats.npz), or
-    False (raw)."""
+    `drop_noise=True` filters kickoff-freeze/post-goal windows; `resume` sets where
+    each dead span ends. `pad_state=True` appends 34 boost-pad recharge cols.
+    `normalize`: "physical" (fixed game-bound scaling -> [-1,1]), True/(mean,std)
+    (z-score via norm_stats.npz), or False (raw).
+    `symmetric=True` drops the 8 action cols so self/opponent are identical 16-dim
+    physical objects (frame 59->51). `mirror=True` (implies symmetric) also emits the
+    RLGym-style team-inverted view -> 2x data, all in one canonical frame."""
     ds = WindowDataset(shards_dir, window, gap, step, normalize, shuffle, seed,
-                       drop_noise, resume, pad_state)
+                       drop_noise, resume, pad_state, symmetric, mirror)
     return torch.utils.data.DataLoader(ds, batch_size=batch_size, num_workers=num_workers), ds
 
 
