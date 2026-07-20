@@ -144,6 +144,69 @@ def _load_norm(shards_dir, normalize):
 
 
 # --------------------------------------------------------------------------- #
+# Physical-constant normalization — divide each feature by its KNOWN game bound
+# so inputs land in ~[-1, 1] (or [0, 1]), then clip. Deterministic (no dataset
+# stats to persist), train/deploy-consistent, and matches RLGym-style obs — the
+# right default when you'll fine-tune in an RL env later.
+#
+# Raw-unit reminders (see the encoding audit): velocity is x10 uu/s, angular
+# velocity is x1000 rad/s, boost is a 0-255 byte, rotations are euler radians,
+# and *_active are 0-12 STATE CODES (thresholded to a bool, not scaled).
+# --------------------------------------------------------------------------- #
+_PI = float(np.pi)
+
+
+def _phys_divisor(name):
+    """(divisor, is_flag) for one feature. is_flag -> threshold >0 to {0,1}
+    instead of scaling. divisor 1.0 -> leave as-is (already normalized)."""
+    if ".act." in name:                      # controller inputs already in [-1,1]/{0,1}
+        return 1.0, False
+    if name.endswith(("jump_active", "dodge_active", "double_jump_active")):
+        return 1.0, True                     # 0-12 state code -> boolean
+    if name.startswith("ball."):
+        if "ang_vel" in name: return 6000.0, False       # 6 rad/s x1000
+        if "vel" in name:     return 60000.0, False      # 6000 uu/s x10
+        if name.endswith("pos_x"): return 4096.0, False
+        if name.endswith("pos_y"): return 5120.0, False
+        if name.endswith("pos_z"): return 2044.0, False
+        if "rot" in name: return _PI, False
+    if name.startswith("player.") or name.startswith("opponent."):
+        if "ang_vel" in name: return 5500.0, False       # 5.5 rad/s x1000
+        if "vel" in name:     return 23000.0, False      # 2300 uu/s x10
+        if name.endswith("pos_x"): return 4096.0, False
+        if name.endswith("pos_y"): return 5120.0, False
+        if name.endswith("pos_z"): return 2044.0, False
+        if "rot" in name: return _PI, False
+        if name.endswith(".boost"): return 255.0, False
+    if name.startswith("env."):
+        if name.endswith("seconds_remaining"): return 300.0, False
+        if name.endswith(("blue_score", "orange_score", "score_diff")): return 10.0, False
+        # is_overtime / ball_has_been_hit / kickoff / pad_recharge_* -> already 0-1
+    return 1.0, False
+
+
+def build_physical_norm(feature_names):
+    """-> (scale[F] float32 multiplier = 1/bound, flag_mask[F] bool)."""
+    scale = np.ones(len(feature_names), np.float32)
+    flag = np.zeros(len(feature_names), dtype=bool)
+    for i, n in enumerate(feature_names):
+        div, is_flag = _phys_divisor(n)
+        scale[i] = 1.0 / div
+        flag[i] = is_flag
+    return scale, flag
+
+
+def apply_physical_norm(a, scale, flag):
+    """a[N,F] raw -> physically normalized, clipped to [-1,1]. Flag columns become
+    (x>0) booleans; already-[0,1] columns (booleans, pads) pass through unclipped."""
+    out = a * scale
+    if flag.any():
+        out[:, flag] = (a[:, flag] > 0.0).astype(np.float32)
+    np.clip(out, -1.0, 1.0, out=out)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Windowed dataset — for the masked-history JEPA. Experiment with the horizon
 # via `window` (#frames) and `gap` (frame spacing; window spans (window-1)*gap+1
 # real frames, so gap dilates the temporal horizon without more tokens).
@@ -234,8 +297,17 @@ class WindowDataset(IterableDataset):
             from boost_pad_state import PAD_FEATURE_NAMES
             self.feature_names = self.feature_names + PAD_FEATURE_NAMES
             self.feat_dim = self.feat_dim + len(PAD_FEATURE_NAMES)
-        norm = _load_norm(shards_dir, normalize)
-        self.mean, self.std = (norm if norm is not None else (None, None))
+        # normalize="physical" -> fixed scale by known game bounds (deterministic);
+        # True / (mean,std) -> empirical z-score via norm_stats.npz; False -> raw.
+        self.physical = isinstance(normalize, str) and normalize == "physical"
+        if self.physical:
+            # built from BASE features (a is the 59-dim frame before pads append;
+            # pad/boolean cols are already 0-1 and pass through untouched).
+            self.phys_scale, self.phys_flag = build_physical_norm(meta["feature_names"])
+            self.mean = self.std = None
+        else:
+            norm = _load_norm(shards_dir, normalize)
+            self.mean, self.std = (norm if norm is not None else (None, None))
 
     def __iter__(self):
         info = get_worker_info()
@@ -263,7 +335,9 @@ class WindowDataset(IterableDataset):
             if self.pad_state:
                 from boost_pad_state import shard_pad_recharge
                 pads = shard_pad_recharge(arr, meta)          # [total, 34], already [0,1]
-            if self.mean is not None:
+            if self.physical:
+                a = apply_physical_norm(a, self.phys_scale, self.phys_flag)  # base feats
+            elif self.mean is not None:
                 a = (a - self.mean) / self.std                # normalize base feats only
             if pads is not None:
                 a = np.concatenate([a, pads], axis=1)         # append after (un-normalized)
@@ -293,7 +367,10 @@ def build_window_loader(shards_dir, window=5, gap=1, step=1, batch_size=64,
     """DataLoader yielding windows [B, window, feat_dim] for the masked-history model.
     `drop_noise=True` filters out kickoff-freeze and post-goal windows; `resume`
     ("go"/"first_touch") sets where each dead span ends. `pad_state=True` appends the
-    34 boost-pad recharge-fraction columns (feat_dim -> feat_dim+34)."""
+    34 boost-pad recharge-fraction columns (feat_dim -> feat_dim+34).
+    `normalize`: "physical" (fixed scale by known game bounds -> [-1,1], deterministic,
+    no stats file needed), True/(mean,std) (empirical z-score via norm_stats.npz), or
+    False (raw)."""
     ds = WindowDataset(shards_dir, window, gap, step, normalize, shuffle, seed,
                        drop_noise, resume, pad_state)
     return torch.utils.data.DataLoader(ds, batch_size=batch_size, num_workers=num_workers), ds
