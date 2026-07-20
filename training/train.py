@@ -1,4 +1,4 @@
-from functions import *
+from training.functions import *
 
 def train_ac(model, epochs, loader, optim, device="cpu"):
     model.to(device)
@@ -160,9 +160,9 @@ def train_mask(model, epochs, loader, optim, device="cpu"):
 
             total_samples += batch_size
 
-        avg = {name: value / total_samples for name, value in totals.items()}
+        #avg = {name: value / total_samples for name, value in totals.items()}
 
-        print(
+        """print(
             f"Epoch {epoch + 1:03d} | "
             f"loss={avg['loss']:.6f} | "
             f"predict future latent sim={avg['prediction_cosine']:.4f} | "
@@ -179,4 +179,4 @@ def train_mask(model, epochs, loader, optim, device="cpu"):
             f"offdiag_sim={avg['offdiag']:.4f}"
         )
 
-        print('-----------------------------\n')
+        print('-----------------------------\n')"""

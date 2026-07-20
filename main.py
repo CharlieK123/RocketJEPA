@@ -1,7 +1,6 @@
-import torch
 from torch.utils.data import TensorDataset, DataLoader
-from models import JEPA
-from train import *
+from model.jepa import JEPA
+from training.train import *
 
 BATCH_SIZE = 32
 STATES_PER_SAMPLE = 5

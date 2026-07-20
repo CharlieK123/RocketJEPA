@@ -1,5 +1,5 @@
 # Secrets
-.ballchasing_token
+data/.ballchasing_token
 
 # Downloaded / processed data (large, do not commit)
 *.replay
