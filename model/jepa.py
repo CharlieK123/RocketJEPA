@@ -55,9 +55,13 @@ class JEPA(nn.Module):
         # aligned with the target read-out below.
         masked_latent_t = self.predictor(latent_t, masked_indices)
 
-        # stop grad EMA target encoders true labels:
+        # stop grad EMA target encoders true labels. The target embeds its OWN
+        # input (I-JEPA: the target is a full EMA encoder, embedding + blocks) —
+        # NOT the online embedding — so the tokenizer is under stop-grad too and
+        # can't collapse to a trivial constant.
         with torch.no_grad():
-            true_masked_latent_t = self.target_encoder(state)
+            target_state = self.target_encoder.embed(state_history)
+            true_masked_latent_t = self.target_encoder(target_state)
             true_masked_latent_t = true_masked_latent_t[:, masked_indices]
 
         return masked_latent_t, true_masked_latent_t
