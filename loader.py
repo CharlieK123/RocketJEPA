@@ -215,7 +215,7 @@ class WindowDataset(IterableDataset):
 
     def __init__(self, shards_dir, window=5, gap=1, step=1,
                  normalize=False, shuffle=True, seed=0, drop_noise=True,
-                 resume="go"):
+                 resume="go", pad_state=False):
         self.files = sorted(glob.glob(str(Path(shards_dir) / "shard_*.zst")))
         if not self.files:
             raise FileNotFoundError(f"no shard_*.zst in {shards_dir}")
@@ -223,9 +223,17 @@ class WindowDataset(IterableDataset):
         self.shuffle, self.seed = shuffle, seed
         self.drop_noise = drop_noise
         self.resume = resume
+        # pad_state: reconstruct + append the 34 boost-pad recharge-fraction columns
+        # to the env block on the fly (env 7 -> 41, frame feat_dim -> feat_dim+34).
+        # Deterministic from car positions; see boost_pad_state.py.
+        self.pad_state = pad_state
         _, meta = load_shard(self.files[0])
         self.feature_names = meta["feature_names"]
         self.feat_dim = meta["feat_dim"]
+        if pad_state:
+            from boost_pad_state import PAD_FEATURE_NAMES
+            self.feature_names = self.feature_names + PAD_FEATURE_NAMES
+            self.feat_dim = self.feat_dim + len(PAD_FEATURE_NAMES)
         norm = _load_norm(shards_dir, normalize)
         self.mean, self.std = (norm if norm is not None else (None, None))
 
@@ -239,16 +247,26 @@ class WindowDataset(IterableDataset):
         for fi in order:
             arr, meta = load_shard(files[fi])
             a = arr.astype(np.float32)
-            # live mask on RAW values (score/hit flags) before any normalization
+            # live mask on RAW values (score/hit flags) before any normalization.
+            # Use the shard's own feature_names (not self.feature_names, which may
+            # carry the extra pad columns that arr doesn't have yet).
+            base_names = meta["feature_names"]
             live = None
             if self.drop_noise:
                 live = np.ones(len(arr), dtype=bool)
                 for r in meta["replays"]:
                     lo, L = r["start"], r["length"]
-                    live[lo:lo + L] = live_play_mask(arr[lo:lo + L], self.feature_names,
+                    live[lo:lo + L] = live_play_mask(arr[lo:lo + L], base_names,
                                                      resume=self.resume)
+            # boost-pad recharge fractions: reconstruct from RAW positions per replay
+            pads = None
+            if self.pad_state:
+                from boost_pad_state import shard_pad_recharge
+                pads = shard_pad_recharge(arr, meta)          # [total, 34], already [0,1]
             if self.mean is not None:
-                a = (a - self.mean) / self.std
+                a = (a - self.mean) / self.std                # normalize base feats only
+            if pads is not None:
+                a = np.concatenate([a, pads], axis=1)         # append after (un-normalized)
             # prefix sum of dead frames -> O(1) "is span [st,st+span) all live?"
             dead_ps = (np.concatenate([[0], np.cumsum(~live)])
                        if live is not None else None)
@@ -271,12 +289,13 @@ class WindowDataset(IterableDataset):
 
 def build_window_loader(shards_dir, window=5, gap=1, step=1, batch_size=64,
                         normalize=False, num_workers=0, shuffle=True, seed=0,
-                        drop_noise=True, resume="go"):
+                        drop_noise=True, resume="go", pad_state=False):
     """DataLoader yielding windows [B, window, feat_dim] for the masked-history model.
     `drop_noise=True` filters out kickoff-freeze and post-goal windows; `resume`
-    ("go"/"first_touch") sets where each dead span ends."""
+    ("go"/"first_touch") sets where each dead span ends. `pad_state=True` appends the
+    34 boost-pad recharge-fraction columns (feat_dim -> feat_dim+34)."""
     ds = WindowDataset(shards_dir, window, gap, step, normalize, shuffle, seed,
-                       drop_noise, resume)
+                       drop_noise, resume, pad_state)
     return torch.utils.data.DataLoader(ds, batch_size=batch_size, num_workers=num_workers), ds
 
 
