@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from copy import deepcopy
-from model.encoder import Transformer
+from RocketJEPA.model.encoder import Transformer
 
 
 class JEPA(nn.Module):

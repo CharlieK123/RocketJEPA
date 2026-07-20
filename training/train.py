@@ -1,4 +1,4 @@
-from training.functions import *
+from RocketJEPA.training.functions import *
 
 def train_ac(model, epochs, loader, optim, device="cpu"):
     model.to(device)
@@ -92,7 +92,7 @@ def train_ac(model, epochs, loader, optim, device="cpu"):
 
         print('-----------------------------\n')
 
-def train_mask(model, epochs, loader, optim, device="cpu"):
+def train_maskh(model, epochs, loader, optim, device="cpu"):
     model.to(device)
     model.train()
 
@@ -123,6 +123,7 @@ def train_mask(model, epochs, loader, optim, device="cpu"):
             z_normalized = F.normalize(z, dim=-1)
 
             loss = F.smooth_l1_loss(z_hat_normalized, z_normalized)
+            print(loss)
 
             optim.zero_grad(set_to_none=True)
             loss.backward()
@@ -133,7 +134,7 @@ def train_mask(model, epochs, loader, optim, device="cpu"):
             model.update_target_params()
 
             # eval metrics
-            break
+            continue
             with torch.no_grad():
                 online_latent = model.encoder(states)
 
@@ -178,5 +179,5 @@ def train_mask(model, epochs, loader, optim, device="cpu"):
             f"eff_rank_tar={avg['effrank_tar']:.2f} | "
             f"offdiag_sim={avg['offdiag']:.4f}"
         )
-
-        print('-----------------------------\n')"""
+        """
+        print('-----------------------------\n')

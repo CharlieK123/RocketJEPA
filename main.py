@@ -16,11 +16,12 @@ import torch.nn.functional as F
 from model.jepa import JEPA
 from loader import build_window_loader
 from training.functions import effective_rank, batch_collapse_metrics
+import time
 
 # --------------------------- config (tweak me) ----------------------------- #
-SHARDS        = "data/shards_250k"   # <- point at your local shard directory
+SHARDS        = r"C:\Users\charl\PycharmProjects\RocketJEPA_pc\RocketJEPA\data\shards_250k"   # <- point at your local shard directory
 WINDOW        = 5                    # frames per sample (keep 5: PosEncoding + mask_queries assume it)
-BATCH_SIZE    = 256
+BATCH_SIZE    = 2048
 EPOCHS        = 100
 LR            = 1e-4
 WEIGHT_DECAY  = 1e-5
@@ -42,8 +43,8 @@ def build():
         f"— update OBJ_LENGTHS / pad_state / symmetric to match")
 
     model = JEPA(
-        latent_dim=128, encoder_blocks=2, encoder_hdim=256, encoder_attheads=4,
-        proj_blocks=2, proj_hdim=128, proj_attheads=4, momentum=0.995,
+        latent_dim=512, encoder_blocks=7, encoder_hdim=2048, encoder_attheads=8,
+        proj_blocks=2, proj_hdim=128, proj_attheads=4, momentum=0.997,
         obj_lengths=OBJ_LENGTHS, emb_hdim=256,
     ).to(DEVICE)
     optim = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -59,9 +60,9 @@ def train(loader, model, optim):
             window = window.to(DEVICE, non_blocking=True)
             z_hat, z = model(window)                   # masked pred, target [B, n_masked, D]
 
-            z_hat_n = F.normalize(z_hat, dim=-1)
-            z_n = F.normalize(z, dim=-1)
-            loss = F.smooth_l1_loss(z_hat_n, z_n)
+            #z_hat_n = F.normalize(z_hat, dim=-1)
+            #z_n = F.normalize(z, dim=-1)
+            loss = F.smooth_l1_loss(z_hat, z)
 
             optim.zero_grad(set_to_none=True)
             loss.backward()
@@ -79,6 +80,7 @@ def train(loader, model, optim):
                 tot["offdiag"]    += batch_collapse_metrics(flat) * b
                 tot["grad"]       += float(grad) * b
                 n += b
+                print(loss, effective_rank(flat), batch_collapse_metrics(flat), '\n')
 
         a = {k: v / max(n, 1) for k, v in tot.items()}
         print(f"epoch {epoch + 1:03d} | loss={a['loss']:.5f} | pred_cos={a['pred_cos']:.4f} "
