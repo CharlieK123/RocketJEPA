@@ -20,7 +20,7 @@ import time
 
 # --------------------------- config (tweak me) ----------------------------- #
 SHARDS        = r"C:\Users\charl\PycharmProjects\RocketJEPA_pc\RocketJEPA\data\shards_250k"   # <- point at your local shard directory
-WINDOW        = 5                    # frames per sample (keep 5: PosEncoding + mask_queries assume it)
+WINDOW        = 5                    # frames per sample (keep 5: PosEncoding STATES assumes it)
 BATCH_SIZE    = 2048
 EPOCHS        = 100
 LR            = 1e-4

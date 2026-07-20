@@ -25,12 +25,16 @@ class PosEncoding(nn.Module):
         pe[:, 1::2] = torch.cos(pos * div[:pe[:, 1::2].shape[1]])
         return pe
 
-    def forward(self, x):
-        state_ids = torch.arange(self.states, device=x.device).repeat_interleave(self.objects)
-        object_ids = torch.arange(self.objects, device=x.device).repeat(self.states)
+    def table(self, device):
+        # full [states*objects, dim] PE table for the flattened token layout
+        # (token i -> state i//objects, object i%objects). Same indexing embed()
+        # relies on, so predictor mask-queries can look up a slot's encoding.
+        state_ids = torch.arange(self.states, device=device).repeat_interleave(self.objects)
+        object_ids = torch.arange(self.objects, device=device).repeat(self.states)
+        return self.state_pe[state_ids] + self.object_pe[object_ids]
 
-        pe = self.state_pe[state_ids] + self.object_pe[object_ids]
-        return x + pe.unsqueeze(0)
+    def forward(self, x):
+        return x + self.table(x.device).unsqueeze(0)
 
 
 class ObjectEncoder(nn.Module):
@@ -88,14 +92,12 @@ class Transformer(nn.Module):
         self.ffn = nn.ModuleList([ffn() for _ in range(blocks)])
         self.norm = nn.ModuleList([norm() for _ in range(blocks * 2)])
 
-        # if this instance is used as the projector then you need to make 5 extra query vectors
-        # 5 is a hardcoded number for the history, these are the important ones and only
-        # ones used after the projector is done
+        # projector mode: ONE shared learned mask token. Per-slot identity is NOT
+        # baked into separate query vectors (the old 5 anonymous queries couldn't
+        # know which position they predicted); instead forward() adds the target
+        # slot's position encoding, so each query is mask_token + pos[masked_idx].
         if proj is not False:
-            self.mask_queries = nn.Parameter(torch.randn(STATES, residual_dim))
-
-            self.proj_encode = lambda x: torch.cat((x, self.mask_queries.unsqueeze(0).expand(x.size(0), -1, -1)), dim=1)
-            self.proj_decode = lambda x: x[:, -self.mask_queries.size(0):]
+            self.mask_token = nn.Parameter(torch.randn(1, residual_dim))
 
     def block(self, x, i):
 
@@ -118,15 +120,22 @@ class Transformer(nn.Module):
 
         return x
 
-    def forward(self, x):
-        # adds n query tokens to act as the contextual information for masked tokens
-        if self.proj: x = self.proj_encode(x)
+    def forward(self, x, masked_indices=None):
+        # projector mode: append one mask query per masked slot, each stamped with
+        # that slot's position encoding so the prediction is position-aware and
+        # lines up (in masked_indices order) with the target read-out.
+        if self.proj:
+            pe = self.pos.table(x.device)[masked_indices]          # [n_masked, DIM]
+            queries = (self.mask_token + pe).unsqueeze(0).expand(x.size(0), -1, -1)
+            n_masked = queries.size(1)
+            x = torch.cat((x, queries), dim=1)                     # [B, visible+n_masked, DIM]
 
         for i in range(self.blocks):
             x = self.block(x, i)
 
-        # ensures that only the masked query tokens are returned
-        if self.proj: x = self.proj_decode(x)
+        # return only the mask-query outputs, in masked_indices order
+        if self.proj:
+            x = x[:, -n_masked:]
 
         return x
 

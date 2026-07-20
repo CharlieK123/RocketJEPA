@@ -44,15 +44,16 @@ class JEPA(nn.Module):
             masked_indices = mask.nonzero(as_tuple=True)[0]
 
             visible_tokens = state[:, visible_indices]
-            masked_tokens = state[:, masked_indices]
         else:
             visible_tokens = state
-            masked_tokens = None
             masked_indices = None
 
         # encode the non masked tokens to get their context
         latent_t = self.encoder(visible_tokens)
-        masked_latent_t = self.predictor(latent_t)
+        # predictor fills the masked slots; masked_indices give each mask query its
+        # target slot's position encoding so the prediction is position-aware and
+        # aligned with the target read-out below.
+        masked_latent_t = self.predictor(latent_t, masked_indices)
 
         # stop grad EMA target encoders true labels:
         with torch.no_grad():
