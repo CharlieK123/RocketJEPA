@@ -43,18 +43,19 @@ class ObjectEncoder(nn.Module):
 
         self.objects = len(obj_lengths)
         self.object_projections = nn.ModuleList([embedding(i) for i in range(self.objects)])
+        # cumulative slice boundaries so build() splits the flat frame BY obj_lengths
+        # instead of hardcoded widths -> works for any schema (73, 85, ...).
+        self.offsets = [0]
+        for length in obj_lengths:
+            self.offsets.append(self.offsets[-1] + length)
 
     def build(self, x):
-        # parse all of the data and group it into their respective objects
-        # note this line assumes x is a [B, 73] dim vector for simplicity
-        objects = ball_vec, player_vec, opponent_vec, env_vec = x[:, :12], x[:, 12:34], x[:, 34:50], x[:, 50:73]
-
-        # take every object and push it through its respective encoder
-        # then concat all 4 objects into one tensor [B, OBJS, DIM]
+        # slice the flat per-frame vector into its objects using obj_lengths
+        # (ball, self, opponent, env), project each, stack -> [B, OBJS, DIM]
         encoded_state = []
-        for i, obj in enumerate(objects):
-            proj = self.object_projections[i]
-            encoded_state.append(proj(obj))
+        for i in range(self.objects):
+            obj = x[:, self.offsets[i]: self.offsets[i + 1]]
+            encoded_state.append(self.object_projections[i](obj))
 
         return torch.stack(encoded_state, dim=1)
 

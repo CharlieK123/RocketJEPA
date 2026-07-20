@@ -59,10 +59,6 @@ class JEPA(nn.Module):
             true_masked_latent_t = self.target_encoder(state)
             true_masked_latent_t = true_masked_latent_t[:, masked_indices]
 
-
-        print(visible_tokens.shape, masked_tokens.shape if masked_tokens is not None else None, state.shape,
-              true_masked_latent_t.shape, latent_t.shape)
-
         return masked_latent_t, true_masked_latent_t
 
     @torch.no_grad()
