@@ -224,9 +224,12 @@ def apply_physical_norm(a, scale, flag):
 # emits the inverted view (2x data).
 # --------------------------------------------------------------------------- #
 def symmetric_keep(feature_names):
-    """(keep_idx, kept_names): drop the 8 player.act.* cols so self & opponent are
-    identical 16-dim physical objects. ball(12)+self(16)+opp(16)+env(7) = 51."""
-    keep = [i for i, n in enumerate(feature_names) if not n.startswith("player.act.")]
+    """(keep_idx, kept_names): OPTIONAL physics-only mode — drop BOTH cars' 8 action
+    cols so self & opponent are 16-dim physical objects. Not needed now that shards
+    store both cars' actions (both cars are already symmetric 24-dim); kept for a
+    physics-only variant. ball(12)+self(16)+opp(16)+env(7) = 51."""
+    keep = [i for i, n in enumerate(feature_names)
+            if not (n.startswith("player.act.") or n.startswith("opponent.act."))]
     return keep, [feature_names[i] for i in keep]
 
 
@@ -245,10 +248,10 @@ def build_invert_plan(feature_names):
         elif base == "rot_y":                       # yaw
             yaw_cols.append(i)
     perm = list(range(F))
-    for i, n in enumerate(feature_names):           # swap the two cars
-        if n.startswith("player.") and not n.startswith("player.act."):
-            j = idx.get("opponent." + n.split(".", 1)[1])
-            if j is not None:
+    for i, n in enumerate(feature_names):           # swap the two cars (incl their
+        if n.startswith("player."):                 # actions — invariant under the
+            j = idx.get("opponent." + n.split(".", 1)[1])   # rotation, just travel
+            if j is not None:                        # with their car)
                 perm[i], perm[j] = j, i
     if "env.blue_score" in idx and "env.orange_score" in idx:
         b, o = idx["env.blue_score"], idx["env.orange_score"]
@@ -348,11 +351,11 @@ class WindowDataset(IterableDataset):
         self.resume = resume
         # pad_state: append the 34 boost-pad recharge cols (env 7 -> 41).
         self.pad_state = pad_state
-        # symmetric: drop the 8 action cols so self & opponent are identical 16-dim
-        # physical objects (frame 59 -> 51). mirror: also emit the team-inverted view
-        # (2x data); requires symmetric (orange has no actions to invert), so it
-        # force-enables it. See the RLGym-sim invert helpers above.
-        self.symmetric = symmetric or mirror
+        # Shards now store BOTH cars' actions, so self & opponent are already
+        # symmetric 24-dim objects and mirror works directly (no dropping needed).
+        # symmetric=True is an OPTIONAL physics-only mode that drops both cars'
+        # actions (67 -> 51). mirror=True emits the team-inverted view (2x data).
+        self.symmetric = symmetric
         self.mirror = mirror
         _, meta = load_shard(self.files[0])
         base_names = meta["feature_names"]                       # 59

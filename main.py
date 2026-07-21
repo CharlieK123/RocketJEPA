@@ -28,15 +28,15 @@ WEIGHT_DECAY  = 1e-5
 NUM_WORKERS   = 4
 DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
 
-# frame layout from the loader (symmetric + pad_state): ball(12) + self(16) +
-# opponent(16) + env(7 base + 34 boost-pad recharge = 41) = 85.
-OBJ_LENGTHS   = (12, 16, 16, 41)
+# frame layout from the loader (pad_state, both cars incl actions): ball(12) +
+# self(24) + opponent(24) + env(7 base + 34 boost-pad recharge = 41) = 101.
+OBJ_LENGTHS   = (12, 24, 24, 41)
 
 
 def build():
     loader, ds = build_window_loader(
         SHARDS, window=WINDOW, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS,
-        pad_state=True, normalize="physical", symmetric=True, mirror=True,
+        pad_state=True, normalize="physical", mirror=True,   # symmetric off: keep both cars' actions (24-dim each)
     )
     assert ds.feat_dim == sum(OBJ_LENGTHS), (
         f"loader feat_dim {ds.feat_dim} != sum(OBJ_LENGTHS) {sum(OBJ_LENGTHS)} "
