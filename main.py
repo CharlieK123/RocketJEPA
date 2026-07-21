@@ -28,24 +28,27 @@ WEIGHT_DECAY  = 1e-5
 NUM_WORKERS   = 4
 DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
 
-# frame layout (pad_state, fwd/right/up orientation, both cars incl actions):
-# ball(9, no rotation) + self(30) + opponent(30) + env(7 base + 34 pads = 41) = 110.
-OBJ_LENGTHS   = (9, 30, 30, 41)
+# MIRROR = team-perspective augmentation (2x data). ONLY valid for the new symmetric
+# schema (both cars have actions + forward/up orientation). The old 250k corpus is
+# asymmetric (opponent has no actions, euler rotation) and CANNOT be mirrored -> keep
+# MIRROR=False for it; set True once training on the new-schema corpus.
+MIRROR = False
+# obj_lengths is auto-derived from the shards' actual schema (ds.obj_lengths), so this
+# file trains on EITHER the old 250k (12,24,16,41) or the new corpus (9,30,30,41)
+# with no edits — the model just matches whatever the loader loaded.
 
 
 def build():
     loader, ds = build_window_loader(
         SHARDS, window=WINDOW, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS,
-        pad_state=True, normalize="physical", mirror=True,   # symmetric off: keep both cars' actions (24-dim each)
+        pad_state=True, normalize="physical", mirror=MIRROR,
     )
-    assert ds.feat_dim == sum(OBJ_LENGTHS), (
-        f"loader feat_dim {ds.feat_dim} != sum(OBJ_LENGTHS) {sum(OBJ_LENGTHS)} "
-        f"— update OBJ_LENGTHS / pad_state / symmetric to match")
+    obj_lengths = ds.obj_lengths          # matches the loaded shards' schema
 
     model = JEPA(
         latent_dim=512, encoder_blocks=7, encoder_hdim=2048, encoder_attheads=8,
         proj_blocks=2, proj_hdim=128, proj_attheads=4, momentum=0.997,
-        obj_lengths=OBJ_LENGTHS, emb_hdim=256,
+        obj_lengths=obj_lengths, emb_hdim=256,
     ).to(DEVICE)
     optim = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     return loader, ds, model, optim
@@ -99,6 +102,6 @@ def train(loader, model, optim):
 
 if __name__ == "__main__":                             # guard required for num_workers>0 on Windows
     loader, ds, model, optim = build()
-    print(f"device={DEVICE} | feat_dim={ds.feat_dim} | obj_lengths={OBJ_LENGTHS} | "
-          f"shards={len(ds.files)} | params={sum(p.numel() for p in model.parameters()):,}")
+    print(f"device={DEVICE} | feat_dim={ds.feat_dim} | obj_lengths={ds.obj_lengths} | "
+          f"mirror={MIRROR} | shards={len(ds.files)} | params={sum(p.numel() for p in model.parameters()):,}")
     train(loader, model, optim)

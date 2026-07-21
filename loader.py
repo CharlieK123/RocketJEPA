@@ -381,6 +381,12 @@ class WindowDataset(IterableDataset):
             from boost_pad_state import PAD_FEATURE_NAMES
             self.feature_names = self.feature_names + PAD_FEATURE_NAMES
             self.feat_dim += len(PAD_FEATURE_NAMES)
+        # obj_lengths derived from the ACTUAL feature set (ball / player / opponent /
+        # env), so the model auto-matches whatever schema the shards carry — old
+        # 59-dim (12,24,16,7[+34]) or new (9,30,30,7[+34]) — no hardcoding.
+        self.obj_lengths = tuple(
+            sum(1 for n in self.feature_names if n.startswith(p))
+            for p in ("ball.", "player.", "opponent.", "env."))
         # normalization is built on the (possibly symmetric) base feature set;
         # pad/boolean cols already 0-1 pass through. "physical" -> fixed game-bound
         # scaling; True/(mean,std) -> z-score via norm_stats.npz; False -> raw.
