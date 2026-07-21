@@ -72,15 +72,24 @@ def train(loader, model, optim):
 
             with torch.no_grad():
                 b = window.size(0)
-                flat = z.reshape(-1, z.size(-1))        # [B*n_masked, D] for collapse metrics
+                # collapse metrics on the ONLINE encoder's PER-SAMPLE representation:
+                # encode all 20 object-tokens (no mask) and mean-pool to one vector
+                # per sample. This measures true per-state representational diversity.
+                # (The old metric used z.reshape(B*n_masked, D) — dominated by the ~5
+                # batch-shared PE slot-clusters, so effrank was pinned near ~5 and
+                # couldn't distinguish collapse from healthy. effective_rank centers
+                # internally; offdiag is centered here to drop the shared common-mode.)
+                rep = model.encoder(model.encoder.embed(window)).mean(1)   # [B, D]
+                rep_c = rep - rep.mean(0, keepdim=True)
                 tot["loss"]       += loss.item() * b
                 tot["pred_cos"]   += F.cosine_similarity(z_hat, z, dim=-1).mean().item() * b
-                tot["latent_std"] += flat.std(0, unbiased=False).mean().item() * b
-                tot["effrank"]    += effective_rank(flat) * b
-                tot["offdiag"]    += batch_collapse_metrics(flat) * b
+                tot["latent_std"] += rep.std(0, unbiased=False).mean().item() * b
+                tot["effrank"]    += effective_rank(rep) * b
+                tot["offdiag"]    += batch_collapse_metrics(rep_c) * b
                 tot["grad"]       += float(grad) * b
                 n += b
-                print(loss, effective_rank(flat), batch_collapse_metrics(flat), '\n')
+                print(f"loss={loss.item():.5f} effrank={effective_rank(rep):.1f} "
+                      f"latent_std={rep.std(0).mean().item():.4f}")
 
         a = {k: v / max(n, 1) for k, v in tot.items()}
         print(f"epoch {epoch + 1:03d} | loss={a['loss']:.5f} | pred_cos={a['pred_cos']:.4f} "
