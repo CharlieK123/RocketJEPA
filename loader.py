@@ -322,6 +322,15 @@ def live_play_mask(seg, feature_names, resume="go", freeze_speed=1000.0):
             fz = np.where(frozen[a:b])[0]
             if len(fz):                          # resume after last frozen frame
                 dead[a + fz[-1] + 1: b] = False
+
+    # demos: a demolished car's position comes through as NaN -> nan_to_num -> (0,0,0)
+    # for the ~3s it's dead; real grounded cars sit at z~=17, never all-zero. Mark
+    # those frames dead (applied AFTER the resume un-drop so demos stay dead) — this
+    # removes both the origin-parked frames and, via the span check, the respawn
+    # teleport at the demo's edges. Catches brief NaN glitches too.
+    for who in ("player", "opponent"):
+        dead |= ((col(f"{who}.pos_x") == 0) & (col(f"{who}.pos_y") == 0)
+                 & (col(f"{who}.pos_z") == 0))
     return ~dead
 
 
