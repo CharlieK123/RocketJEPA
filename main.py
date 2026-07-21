@@ -28,9 +28,9 @@ WEIGHT_DECAY  = 1e-5
 NUM_WORKERS   = 4
 DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
 
-# frame layout from the loader (pad_state, both cars incl actions): ball(12) +
-# self(24) + opponent(24) + env(7 base + 34 boost-pad recharge = 41) = 101.
-OBJ_LENGTHS   = (12, 24, 24, 41)
+# frame layout (pad_state, fwd/right/up orientation, both cars incl actions):
+# ball(9, no rotation) + self(30) + opponent(30) + env(7 base + 34 pads = 41) = 110.
+OBJ_LENGTHS   = (9, 30, 30, 41)
 
 
 def build():

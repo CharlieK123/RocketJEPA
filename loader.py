@@ -239,14 +239,16 @@ def build_invert_plan(feature_names):
     perm: swap player<->opponent columns and blue<->orange score."""
     F = len(feature_names)
     neg = np.ones(F, np.float32)
-    yaw_cols = []
+    # 180deg-about-z invert: every WORLD vector's x,y components flip. That's exactly
+    # the "_x"/"_y" columns of pos/vel/ang_vel and the forward/right/up orientation
+    # vectors (z stays). No non-vector feature ends in _x/_y (actions, flags, env,
+    # pads don't), so this selects precisely the components to negate. score_diff too.
+    yaw_cols = []                                   # orientation is fwd/right/up now, no euler yaw
     idx = {n: i for i, n in enumerate(feature_names)}
     for i, n in enumerate(feature_names):
         base = n.rsplit(".", 1)[-1]
-        if base in ("pos_x", "pos_y", "vel_x", "vel_y", "ang_vel_x", "ang_vel_y", "score_diff"):
+        if base.endswith("_x") or base.endswith("_y") or base == "score_diff":
             neg[i] = -1.0
-        elif base == "rot_y":                       # yaw
-            yaw_cols.append(i)
     perm = list(range(F))
     for i, n in enumerate(feature_names):           # swap the two cars (incl their
         if n.startswith("player."):                 # actions — invariant under the
